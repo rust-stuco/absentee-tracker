@@ -1,0 +1,4 @@
+CREATE TABLE `weeks` (
+    `id` INTEGER NOT NULL PRIMARY KEY,
+    `date` DATE NOT NULL
+);

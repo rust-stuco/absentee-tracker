@@ -1,208 +1,130 @@
-mod mailer;
-mod roster;
+use attendance::manager::AttendanceManager;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use diesel::QueryResult;
+use std::io::{self, BufRead};
 
-use clap::{Args, Parser, Subcommand};
-use config::Config;
-use roster::AttendanceManager;
-use std::error::Error;
-
-const COLOR_RESET: &str = "\x1b[0m";
-const COLOR_CURRENT_WEEK: &str = "\x1b[1;32m"; // bright green
-
-#[derive(Parser)]
+/// A parser for the command line interface for this attendance application.
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
 struct Cli {
+    /// The different kinds of commands that can be run for this application.
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Add a new student to the roster
-    AddStudent(AddStudentArgs),
+/// The different subcommands that can be run for this attendance application.
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    /// Runs setup for a semester's attendance. ONLY RUN ONCE!
+    Setup,
+    /// Updates the roster of students via the [`ROSTER_PATH`].
+    UpdateRoster,
+    /// Show the roster of students.
+    ShowRoster {
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Show every student who has been absent at least once, after a certain week.
+    Absences {
+        #[arg(short, long)]
+        after_week: i32,
+    },
+    /// Show the info and attendance of a specific student,
+    StudentInfo { id: String },
+    /// Actions to perform specific to a given week.
+    Week(WeekArgs),
+}
 
-    /// Remove a student from the roster
-    RemoveStudent(StudentIdArg),
+/// The command-line arguments for doing actions given a specific week.
+#[derive(Args, Debug, Clone)]
+struct WeekArgs {
+    /// The current week.
+    week: i32,
+    /// The action to perform for the given week.
+    #[arg(value_enum)]
+    command: WeekCommand,
+}
 
-    /// Mark a student as excused for the current week
-    MarkExcused(StudentIdArg),
-
-    /// Mark a student as attended for the current week
-    MarkAttended(StudentIdArg),
-
-    /// Mark multiple students as attended from a file
-    BulkMarkAttended(FilePathArg),
-
-    /// List students with unexcused absences
-    ListUnexcused,
-
-    /// Email students with unexcused absences
-    EmailUnexcused,
-
-    /// Display the current week
+/// The different kinds of actions that can be done for a specific week.
+#[derive(ValueEnum, Debug, Clone)]
+enum WeekCommand {
+    /// Reads student emails from stdin and marks those students as present for the given week.
+    MarkPresent,
+    /// Reads student emails from stdin and marks those students as excused for the given week.
+    MarkExcused,
+    /// Marks any remaining students as absent.
+    MarkAbsent,
+    /// Displays the attendance for the given week.
     ShowWeek,
-
-    /// Reset attendance data for the current week
-    ResetWeek,
-
-    /// Increment to the next week
-    BumpWeek,
-
-    /// Set the current week number
-    SetWeek(WeekArg),
-
-    /// Show aggregate absence statistics
-    AggregateStats,
-
-    /// Flag students at risk due to multiple absences
-    FlagAtRisk,
+    /// Resets / deletes all attendance records for the given week.
+    Reset,
 }
 
-#[derive(Args)]
-struct AddStudentArgs {
-    /// Student's Andrew ID
-    andrew_id: String,
+fn main() -> QueryResult<()> {
+    let args = Cli::parse();
 
-    /// Student's full name
-    name: String,
-
-    /// Student's email address
-    email: String,
+    match args.command {
+        Command::Setup => attendance::setup(),
+        Command::UpdateRoster => attendance::update_roster(),
+        Command::ShowRoster { verbose } => attendance::display::show_roster(verbose),
+        Command::Absences { after_week } => attendance::display::show_absences(after_week),
+        Command::StudentInfo { id } => attendance::display::show_student_info(&id),
+        Command::Week(week_args) => run_week_command(week_args),
+    }
 }
 
-#[derive(Args)]
-struct StudentIdArg {
-    /// Student's Andrew ID
-    andrew_id: String,
-}
+/// A helper function for running the week-specific subcommands.
+fn run_week_command(week_args: WeekArgs) -> QueryResult<()> {
+    let curr_week = week_args.week;
 
-#[derive(Args)]
-struct FilePathArg {
-    /// Path to file containing Andrew IDs
-    file_path: String,
-}
+    match week_args.command {
+        WeekCommand::ShowWeek => {
+            attendance::display::show_week_attendance(curr_week)?;
+            return Ok(());
+        }
+        WeekCommand::MarkAbsent => {
+            AttendanceManager::connect().mark_remaining_absent(curr_week)?;
+            return Ok(());
+        }
+        WeekCommand::Reset => {
+            AttendanceManager::connect().delete_week_attendance(curr_week)?;
+            return Ok(());
+        }
+        WeekCommand::MarkPresent | WeekCommand::MarkExcused => (),
+    };
 
-#[derive(Args)]
-struct WeekArg {
-    /// Week number to set as current
-    week_number: u32,
-}
+    let mut emails = vec![];
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Load configuration from config.toml
-    let settings = Config::builder()
-        .add_source(config::File::with_name("config"))
-        .build()?;
-
-    let roster_path = settings.get_string("attendance_manager.roster_path")?;
-    let weekly_data_path = settings.get_string("attendance_manager.weekly_data_path")?;
-
-    let mut manager = AttendanceManager::new(&roster_path, &weekly_data_path)?;
-
-    let cli = Cli::parse();
-
-    match &cli.command {
-        Commands::AddStudent(args) => {
-            manager.add_student(
-                args.andrew_id.clone(),
-                args.name.clone(),
-                args.email.clone(),
-            )?;
-            println!("Student added successfully.");
-        }
-        Commands::RemoveStudent(args) => {
-            manager.remove_student(&args.andrew_id)?;
-            println!("Student removed successfully.");
-        }
-        Commands::MarkExcused(args) => {
-            manager.mark_excused(&args.andrew_id)?;
-            println!("Student marked as excused.");
-            print_weekly_summary(&manager);
-        }
-        Commands::MarkAttended(args) => {
-            manager.mark_attended(&args.andrew_id)?;
-            println!("Student marked as attended.");
-            print_weekly_summary(&manager);
-        }
-        Commands::BulkMarkAttended(args) => {
-            manager.bulk_mark_attended(&args.file_path)?;
-            println!("Bulk attendance marked successfully.");
-            print_weekly_summary(&manager);
-        }
-        Commands::ListUnexcused => {
-            let unexcused = manager.get_unexcused_absentees();
-            println!("Unexcused absentees:");
-            for (id, student) in unexcused {
-                println!("{}: {} ({})", id, student.name, student.email);
-            }
-        }
-        Commands::EmailUnexcused => {
-            manager.email_unexcused_absentees()?;
-        }
-        Commands::ShowWeek => {
-            print_weekly_summary(&manager);
-        }
-        Commands::BumpWeek => {
-            manager.bump_week()?;
-            println!("Week bumped successfully.");
-            print_weekly_summary(&manager);
-        }
-        Commands::ResetWeek => {
-            manager.reset_weekly_data()?;
-            println!("Weekly data reset successfully.");
-            print_weekly_summary(&manager);
-        }
-        Commands::SetWeek(args) => {
-            match manager.set_current_week(args.week_number) {
-                Ok(_) => println!("Set current week to {}", args.week_number),
-                Err(e) => eprintln!("Error: {}", e),
-            };
-            print_weekly_summary(&manager);
-        }
-        Commands::AggregateStats => {
-            let counts = manager.aggregate_unexcused();
-            println!("Unexcused absences:");
-            let mut sorted: Vec<_> = counts.iter().collect();
-            // Sort by highest count first, then alphabetically by andrewid
-            sorted.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(&b.0)));
-
-            for (andrew_id, count) in sorted {
-                println!("- {}: {} absences", andrew_id, count);
-            }
-        }
-        Commands::FlagAtRisk => {
-            let (_, warnings) = manager.aggregate_unexcused_with_warning(2);
-            if !warnings.is_empty() {
-                println!("Students at risk:");
-                for (andrew_id, count) in warnings {
-                    println!("! {} has {} unexcused absences", andrew_id, count);
-                }
-            }
-        }
+    // Read in data from stdin.
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line.expect("Unable to read from stdin");
+        emails.push(line);
     }
 
-    Ok(())
-}
+    // Convert all email addresses to IDs (verifying them along the way).
+    let ids: Vec<&str> = emails
+        .iter()
+        .map(|email| {
+            assert!(
+                email.trim().ends_with("@andrew.cmu.edu"),
+                "email entry is invalid: '{email}'"
+            );
 
-fn print_weekly_summary(manager: &AttendanceManager) {
-    let current_week = manager.get_current_week();
-    let weekly_summary = manager.get_weekly_summary();
-    println!("\nWeekly Data Summary:");
+            let i = email
+                .find("@andrew.cmu.edu")
+                .expect("We just checked that this is here");
 
-    let mut weeks: Vec<_> = weekly_summary.iter().collect();
-    weeks.sort_by_key(|(k, _)| *k);
+            &email[0..i]
+        })
+        .collect();
 
-    for (week, (excused, attended)) in weeks {
-        let is_current = *week == current_week;
+    let mut manager = AttendanceManager::connect();
 
-        let status = if is_current { " (current)" } else { "" };
-        let week_color = if is_current {
-            COLOR_CURRENT_WEEK
-        } else {
-            COLOR_RESET
-        };
-        println!(
-            "{}Week {}{}: {} excused, {} attended",
-            week_color, week, status, excused, attended
-        );
+    match week_args.command {
+        WeekCommand::MarkPresent => manager.mark_present(curr_week, &ids),
+        WeekCommand::MarkExcused => manager.mark_excused(curr_week, &ids),
+        _ => unreachable!("we checked for the other variants above"),
     }
+    .map(|_| ())
 }
