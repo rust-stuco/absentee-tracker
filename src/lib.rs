@@ -4,6 +4,7 @@ use diesel::QueryResult;
 use std::path::Path;
 
 pub mod display;
+pub mod mailer;
 pub mod manager;
 pub mod models;
 pub mod schema;
@@ -11,10 +12,26 @@ pub mod schema;
 use manager::AttendanceManager;
 use models::Student;
 
-/// The path to the roster of students.
-///
-/// We hardcode this since this should only change once per semester.
-const ROSTER_PATH: &str = "../roster-s25.csv";
+use config::Config;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    setup: SetupDetails,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetupDetails {
+    roster_path: String,
+}
+
+fn load_config() -> Result<SetupDetails, config::ConfigError> {
+    let settings = Config::builder()
+        .add_source(config::File::with_name("config"))
+        .build()?;
+    let app_config: AppConfig = settings.try_deserialize()?;
+    Ok(app_config.setup)
+}
 
 /// The date of the first day of attendance.
 ///
@@ -68,7 +85,14 @@ pub fn setup() -> QueryResult<()> {
     let _ = manager.delete_roster();
 
     // Insert the students from the given roster.
-    let new_roster = download_roster(ROSTER_PATH);
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            return Err(diesel::result::Error::RollbackTransaction);
+        }
+    };
+    let new_roster = download_roster(config.roster_path);
     manager.insert_students(&new_roster)?;
 
     let roster = manager.get_roster()?;
@@ -90,7 +114,14 @@ pub fn update_roster() -> QueryResult<()> {
     let mut manager = AttendanceManager::connect();
 
     // Insert the students from the given roster.
-    let new_roster = download_roster(ROSTER_PATH);
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            return Err(diesel::result::Error::RollbackTransaction);
+        }
+    };
+    let new_roster = download_roster(config.roster_path);
 
     let curr_roster = manager.get_roster()?;
 

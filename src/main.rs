@@ -33,6 +33,13 @@ enum Command {
     StudentInfo { id: String },
     /// Actions to perform specific to a given week.
     Week(WeekArgs),
+    /// Email students with excessive absences after a given week.
+    EmailAbsentees {
+        /// The week to start checking from (inclusive)
+        after_week: i32,
+        /// The minimum number of absences to trigger an email
+        min_absences: i32,
+    },
 }
 
 /// The command-line arguments for doing actions given a specific week.
@@ -70,6 +77,10 @@ fn main() -> QueryResult<()> {
         Command::Absences { after_week } => attendance::display::show_absences(after_week),
         Command::StudentInfo { id } => attendance::display::show_student_info(&id),
         Command::Week(week_args) => run_week_command(week_args),
+        Command::EmailAbsentees {
+            after_week,
+            min_absences,
+        } => attendance::mailer::email_absentees(after_week, min_absences),
     }
 }
 

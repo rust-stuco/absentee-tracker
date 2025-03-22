@@ -1,0 +1,8 @@
+[smtp]
+sender = "xtremelysecret@gmail.com"
+cc = "cjtsui@andrew.cmu.edu,jwruan@andrew.cmu.edu,terrancc@andrew.cmu.edu,frf@andrew.cmu.edu"
+email_subject = "98008 Unexcused Absence"
+email_body_path = "./examples/email_body.html"
+
+[setup]
+roster_path = "./examples/roster.csv"
